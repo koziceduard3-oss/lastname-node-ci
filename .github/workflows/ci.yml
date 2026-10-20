@@ -1,25 +1,24 @@
-name: Docker CI/CD
+name: Node.js CI/CD to EC2
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: docker-cicd-main
+  group: ec2-cicd-main
   cancel-in-progress: false
 
 jobs:
-  build-test-publish-deploy:
-    name: Build, publish, and deploy
+  build-test-deploy:
+    name: Test, build, and deploy to EC2
     runs-on: ubuntu-latest
     env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-      DOCKERHUB_READY: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
       EC2_HOST: ${{ secrets.EC2_HOST }}
       EC2_USER: ${{ secrets.EC2_USER }}
       EC2_SSH_KEY_B64: ${{ secrets.EC2_SSH_KEY_B64 }}
@@ -43,7 +42,7 @@ jobs:
       - name: Verify build output
         run: test -s dist/index.html
 
-      - name: Start the app and PostgreSQL with Compose
+      - name: Start the app and PostgreSQL for integration checks
         run: docker compose up --build -d
 
       - name: Verify the app is connected to PostgreSQL
@@ -60,7 +59,7 @@ jobs:
           docker compose logs --tail=100 app db
           exit 1
 
-      - name: Stop Compose services
+      - name: Stop integration services
         if: always()
         run: docker compose down -v
 
@@ -72,99 +71,49 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Generate branch and commit tags
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.DOCKERHUB_USERNAME || 'local' }}/nodeapp
-          tags: |
-            type=ref,event=branch
-            type=sha,format=short,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Log in to Docker Hub
-        if: env.DOCKERHUB_READY == 'true'
-        uses: docker/login-action@v4
-        with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          push: ${{ env.DOCKERHUB_READY == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Warn when Docker Hub credentials are missing
-        if: env.DOCKERHUB_READY != 'true'
-        run: echo '::warning::The image was built but not pushed. Add repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN to publish it.'
-
       - name: Prepare EC2 SSH key
-        if: env.DOCKERHUB_READY == 'true' && env.EC2_READY == 'true'
+        if: env.EC2_READY == 'true' && github.ref == 'refs/heads/main'
         run: |
           set -euo pipefail
-          install -m 700 -d "$HOME/.ssh"
           printf '%s' "$EC2_SSH_KEY_B64" | base64 --decode > "$RUNNER_TEMP/ec2-key.pem"
           chmod 600 "$RUNNER_TEMP/ec2-key.pem"
 
-      - name: Copy Compose configuration to EC2
-        if: env.DOCKERHUB_READY == 'true' && env.EC2_READY == 'true'
+      - name: Copy project to EC2
+        if: env.EC2_READY == 'true' && github.ref == 'refs/heads/main'
         run: |
           set -euo pipefail
           : "${EC2_HOST:?Set EC2_HOST in repository secrets}"
           : "${EC2_USER:?Set EC2_USER in repository secrets}"
-          IMAGE_TAG="sha-$(git rev-parse --short HEAD)"
-          [[ "$DOCKERHUB_USERNAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
-          [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_.-]+$ ]]
-          SSH_OPTS=(-i "$RUNNER_TEMP/ec2-key.pem" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20)
-          ssh "${SSH_OPTS[@]}" "$EC2_USER@$EC2_HOST" 'mkdir -p "$HOME/nodeapp"'
-          scp "${SSH_OPTS[@]}" docker-compose.yml "$EC2_USER@$EC2_HOST:nodeapp/docker-compose.yml"
-          ssh "${SSH_OPTS[@]}" "$EC2_USER@$EC2_HOST" "bash -s -- '$DOCKERHUB_USERNAME' '$IMAGE_TAG'" <<'REMOTE'
-          set -euo pipefail
-          dockerhub_username="$1"
-          image_tag="$2"
+          rsync -az --delete --exclude='.git/' --exclude='node_modules/' --exclude='dist/' --exclude='.env' -e "ssh -i $RUNNER_TEMP/ec2-key.pem -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20" ./ "$EC2_USER@$EC2_HOST:nodeapp/"
 
+      - name: Start the application on EC2
+        if: env.EC2_READY == 'true' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          ssh -i "$RUNNER_TEMP/ec2-key.pem" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 "$EC2_USER@$EC2_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
           if ! command -v docker >/dev/null 2>&1 || ! sudo docker compose version >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y ca-certificates curl
+            sudo apt-get install -y ca-certificates curl openssl
             curl -fsSL https://get.docker.com | sudo sh
           fi
           sudo systemctl enable --now docker
           cd "$HOME/nodeapp"
 
-          if command -v pm2 >/dev/null 2>&1; then
-            pm2 delete nodeapp || true
-            pm2 save || true
-            sudo npm uninstall --global pm2 || true
-          fi
-
-          sudo docker rm -f nodeapp || true
-
-          postgres_password="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env 2>/dev/null | head -n 1 || true)"
-          if [ -z "$postgres_password" ]; then
+          if [ ! -s .env ]; then
             postgres_password="$(openssl rand -hex 32)"
-          fi
-          umask 077
-          cat > .env <<EOF
-          IMAGE_NAME=$dockerhub_username/nodeapp
-          IMAGE_TAG=$image_tag
+            umask 077
+            cat > .env <<EOF
           POSTGRES_DB=nodeapp
           POSTGRES_USER=nodeapp
           POSTGRES_PASSWORD=$postgres_password
           EOF
+          fi
 
-          sudo docker compose pull app
-          sudo docker compose up -d --no-build --remove-orphans
+          sudo docker compose up -d --build --remove-orphans
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:3000/health; then
+              echo
               echo 'EC2 application and PostgreSQL health check passed.'
               exit 0
             fi
@@ -176,8 +125,8 @@ jobs:
           REMOTE
 
       - name: Report that EC2 deployment is not configured
-        if: env.DOCKERHUB_READY == 'true' && env.EC2_READY != 'true'
-        run: echo '::warning::Docker image was pushed, but EC2 deployment was skipped. Add EC2_HOST, EC2_USER, and EC2_SSH_KEY_B64 repository secrets.'
+        if: github.ref == 'refs/heads/main' && env.EC2_READY != 'true'
+        run: echo '::warning::CI and build passed, but EC2 deployment was skipped. Add EC2_HOST, EC2_USER, and EC2_SSH_KEY_B64 repository secrets.'
 
       - name: Remove temporary SSH key
         if: always()
