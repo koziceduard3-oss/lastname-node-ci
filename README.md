@@ -1,49 +1,47 @@
 # Node.js у Docker із CI/CD
 
-Навчальний застосунок Node.js обслуговує сторінку `dist/index.html`, а `/health` перевіряє з'єднання з PostgreSQL. `Dockerfile` збирає застосунок на офіційному `node:lts`, а `docker-compose.yml` запускає Node.js і PostgreSQL 15 разом.
+Навчальний Node.js-застосунок обслуговує сторінку dist/index.html, а /health перевіряє з'єднання з PostgreSQL. Dockerfile збирає застосунок на офіційному образі Node.js LTS, а docker-compose.yml запускає Node.js і PostgreSQL 15 разом.
 
 ## Локальний запуск у Docker Compose
 
 Потрібні Docker Engine/Desktop із Compose v2. Для локального запуску:
 
-```bash
+~~~bash
 docker compose up --build -d
 docker compose ps
 docker compose logs -f app db
-```
+~~~
 
-Відкрийте <http://localhost:3000/>. Перевірка здоров'я застосунку й PostgreSQL: <http://localhost:3000/health>. Зупинити контейнери можна командою `docker compose down`; дані PostgreSQL залишаються у volume `postgres_data`. Щоб видалити й дані бази, додайте `-v`.
+Відкрийте http://localhost:3000/. Перевірка здоров'я застосунку й PostgreSQL: http://localhost:3000/health. Зупинити контейнери можна командою docker compose down; дані PostgreSQL залишаються у volume postgres_data. Щоб видалити також дані бази, додайте прапорець -v.
 
-Локальні параметри можна скопіювати з `.env.example` у `.env`. Пароль `local-only-password` призначений лише для локального прикладу; на EC2 workflow створює окремий випадковий пароль і зберігає його в `.env` на сервері.
+Локальні параметри можна скопіювати з .env.example у .env. Пароль local-only-password призначений лише для локального прикладу. На EC2 workflow створює випадковий пароль і зберігає його у .env на сервері; цей файл не передається з репозиторію.
 
-## Dockerfile та тег коміту
+## GitHub Actions: CI та збірка
 
-Залежності встановлюються після копіювання `package*.json`, а решта проєкту — окремим шаром, щоб Docker міг кешувати встановлення. Для ручної збірки образу з коротким хешем останнього коміту:
+Workflow .github/workflows/ci.yml запускається для push у main і pull request до main. Він установлює Node.js і залежності, збирає застосунок, перевіряє dist/index.html, запускає Node.js разом із PostgreSQL у Docker Compose та перевіряє маршрут /health. Збірка зберігається як artifact GitHub Actions.
 
-```bash
-git rev-parse --short HEAD
-docker build -t <dockerhub-username>/nodeapp:<git-hash> .
-```
+## Деплой на Amazon EC2
 
-Файл `.dockerignore` виключає `node_modules`, `.env`, Git-історію та згенерований `dist/` із build context.
+Для push у main після успішних перевірок workflow виконує SSH-деплой незалежно від Docker Hub: відновлює приватний ключ із Base64, копіює вихідні файли на EC2 через rsync, установлює Docker Engine за потреби, запускає Docker Compose та перевіряє /health зсередини EC2. Docker Hub secrets не потрібні.
 
-## GitHub Actions
+У репозиторії відкрийте Settings → Secrets and variables → Actions і створіть три repository secrets:
 
-`.github/workflows/ci.yml` запускається на кожний push у `main`. Він установлює Node.js і залежності, виконує `npm run build`, перевіряє артефакт збірки, а потім збирає Docker-образ із тегами гілки, короткого commit SHA та `latest`. Для публікації в Docker Hub у **Settings → Secrets and variables → Actions** додайте repository secrets:
+| Назва | Значення |
+|---|---|
+| EC2_HOST | Публічна IPv4-адреса або DNS-ім'я інстансу |
+| EC2_USER | ubuntu для Ubuntu AMI |
+| EC2_SSH_KEY_B64 | Приватний PEM-ключ, закодований у Base64 одним рядком |
 
-- `DOCKERHUB_USERNAME` — ім'я користувача Docker Hub;
-- `DOCKERHUB_TOKEN` — Docker Hub access token із правом запису.
+У PowerShell однорядкове Base64-значення можна отримати локально так:
 
-Якщо їх ще немає, перевірки та збірка образу все одно проходять, а workflow показує попередження, що публікацію пропущено.
+~~~powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('devops-key.pem'))
+~~~
 
-## Деплой на EC2
+Не додавайте PEM-ключ у GitHub-репозиторій або звіт і не надсилайте його у відкритому вигляді. Збережіть лише Base64-значення в EC2_SSH_KEY_B64 у налаштуваннях Actions Secrets.
 
-Після публікації образу workflow може завантажити `docker-compose.yml` на EC2, установити Docker Engine/Compose за відсутності, прибрати старий контейнер `nodeapp` та процес PM2 `nodeapp`, і запустити новий контейнер разом із PostgreSQL. Для цього додайте такі repository secrets:
+Security Group EC2 має дозволяти SSH (TCP 22) від GitHub Actions runner. IP-діапазони hosted runners змінюються; відкриття SSH для 0.0.0.0/0 полегшує тестування, але знижує безпеку. Для постійного використання обмежте джерело або використайте self-hosted runner чи AWS Systems Manager. Порт 3000 у цьому завданні відкривати не потрібно: workflow перевіряє застосунок на самому EC2. Для доступу до сайту з інтернету окремо дозвольте TCP 3000 у Security Group.
 
-- `EC2_HOST` — публічна IP-адреса або DNS-ім'я EC2;
-- `EC2_USER` — SSH-користувач, наприклад `ubuntu` для Ubuntu AMI;
-- `EC2_SSH_KEY_B64` — приватний SSH-ключ у Base64.
+Після push відкрийте вкладку Actions і перевірте зелений запуск. Якщо секретів EC2 ще немає, CI та збірка пройдуть, а кроки деплою будуть пропущені з попередженням. Після додавання секретів повторний push у main виконає фактичний деплой.
 
-Для підключення застосунку ззовні у Security Group EC2 потрібен inbound TCP port 3000. PostgreSQL у Compose прив'язаний лише до loopback інтерфейсу EC2. Переконайтеся, що інстанс і пов'язаний із ним трафік не перевищують ваш AWS Free Tier/кредити; тарифи залежать від акаунта й ресурсів.
-
-Збірка образу та публікація в Docker Hub не створюють EC2-ресурси. Саме EC2 може нараховувати вартість, тож створіть його окремо в межах дозволеного вам ліміту.
+EC2 може спричинити оплату залежно від ресурсів, регіону й доступного Free Tier/кредитів. Перевірте ліміт витрат свого AWS акаунта перед запуском інстансу.
