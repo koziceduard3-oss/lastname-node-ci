@@ -5,14 +5,32 @@ const { Pool } = require('pg');
 
 const port = Number(process.env.PORT || 3000);
 const indexFile = path.join(__dirname, 'dist', 'index.html');
-const pool = new Pool({
-  host: process.env.PGHOST || 'localhost',
-  port: Number(process.env.PGPORT || 5432),
-  database: process.env.PGDATABASE || 'nodeapp',
-  user: process.env.PGUSER || 'nodeapp',
-  password: process.env.PGPASSWORD || 'local-only-password',
-  connectionTimeoutMillis: 3000,
-});
+const databaseUrl = process.env.DATABASE_URL;
+
+let poolOptions;
+if (databaseUrl) {
+  const connectionUrl = new URL(databaseUrl);
+  if (!connectionUrl.searchParams.has('sslmode')) {
+    connectionUrl.searchParams.set('sslmode', 'require');
+  }
+  poolOptions = {
+    connectionString: connectionUrl.toString(),
+    max: 5,
+    connectionTimeoutMillis: 5000,
+  };
+} else {
+  poolOptions = {
+    host: process.env.PGHOST || 'localhost',
+    port: Number(process.env.PGPORT || 5432),
+    database: process.env.PGDATABASE || 'nodeapp',
+    user: process.env.PGUSER || 'nodeapp',
+    password: process.env.PGPASSWORD || 'local-only-password',
+    max: 5,
+    connectionTimeoutMillis: 5000,
+  };
+}
+
+const pool = new Pool(poolOptions);
 let shuttingDown = false;
 
 function delay(milliseconds) {
@@ -26,7 +44,7 @@ async function waitForDatabase() {
       console.log('Successfully connected to PostgreSQL');
       return;
     } catch (error) {
-      console.log(`Waiting for PostgreSQL: ${error.message}`);
+      console.log('Waiting for PostgreSQL: ' + error.message);
       await delay(2000);
     }
   }
@@ -62,7 +80,7 @@ const server = http.createServer((request, response) => {
 });
 
 server.listen(port, '0.0.0.0', () => {
-  console.log(`Hello world! App listening on port ${port}`);
+  console.log('Hello world! App listening on port ' + port);
   void waitForDatabase();
 });
 
