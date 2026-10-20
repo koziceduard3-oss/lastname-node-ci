@@ -1,10 +1,10 @@
-# Node.js у Docker із CI/CD
+# Node.js CI/CD на Render і Supabase
 
-Навчальний Node.js-застосунок обслуговує сторінку dist/index.html, а /health перевіряє з'єднання з PostgreSQL. Dockerfile збирає застосунок на офіційному образі Node.js LTS, а docker-compose.yml запускає Node.js і PostgreSQL 15 разом.
+Навчальний Node.js-застосунок обслуговує сторінку dist/index.html, а маршрут /health перевіряє PostgreSQL. Локально застосунок і PostgreSQL 15 запускаються через Docker Compose. У хмарі застосунок працює як Render Web Service, а база даних розміщується в Supabase.
 
 ## Локальний запуск у Docker Compose
 
-Потрібні Docker Engine/Desktop із Compose v2. Для локального запуску:
+Потрібні Docker Engine/Desktop із Compose v2:
 
 ~~~bash
 docker compose up --build -d
@@ -12,36 +12,36 @@ docker compose ps
 docker compose logs -f app db
 ~~~
 
-Відкрийте http://localhost:3000/. Перевірка здоров'я застосунку й PostgreSQL: http://localhost:3000/health. Зупинити контейнери можна командою docker compose down; дані PostgreSQL залишаються у volume postgres_data. Щоб видалити також дані бази, додайте прапорець -v.
+Відкрийте http://localhost:3000/; перевірка застосунку й бази доступна на http://localhost:3000/health. Зупинити контейнери: docker compose down. Локальна конфігурація бере параметри PostgreSQL із Docker Compose; пароль local-only-password використовується лише для локального прикладу.
 
-Локальні параметри можна скопіювати з .env.example у .env. Пароль local-only-password призначений лише для локального прикладу. На EC2 workflow створює випадковий пароль і зберігає його у .env на сервері; цей файл не передається з репозиторію.
+## GitHub Actions: CI
 
-## GitHub Actions: CI та збірка
+Workflow .github/workflows/ci.yml запускається після push у main, для pull request до main або вручну. Він збирає застосунок, перевіряє dist/index.html, запускає його разом із PostgreSQL у Docker Compose, перевіряє /health і зберігає артефакт збірки. Конфігурація Render задає autoDeployTrigger: checksPass, тому Render починає розгортання після успішних перевірок GitHub Actions.
 
-Workflow .github/workflows/ci.yml запускається для push у main і pull request до main. Він установлює Node.js і залежності, збирає застосунок, перевіряє dist/index.html, запускає Node.js разом із PostgreSQL у Docker Compose та перевіряє маршрут /health. Збірка зберігається як artifact GitHub Actions.
+## Налаштування Supabase
 
-## Деплой на Amazon EC2
+1. Створіть проєкт Supabase на Free plan і дочекайтеся готовності бази PostgreSQL.
+2. У **Connect** виберіть **Session pooler** і скопіюйте connection string. Якщо в рядку є заповнювач пароля, підставте пароль, заданий під час створення проєкту.
+3. Не додавайте connection string до GitHub, README чи коміту: він містить пароль до бази даних.
 
-Для push у main після успішних перевірок workflow виконує SSH-деплой незалежно від Docker Hub: відновлює приватний ключ із Base64, копіює вихідні файли на EC2 через rsync, установлює Docker Engine за потреби, запускає Docker Compose та перевіряє /health зсередини EC2. Docker Hub secrets не потрібні.
+Застосунок читає **DATABASE_URL** і додає sslmode=require, якщо параметр ще відсутній. Для локального Docker Compose ця змінна не потрібна: використовуються стандартні PGHOST, PGPORT, PGDATABASE, PGUSER і PGPASSWORD.
 
-У репозиторії відкрийте Settings → Secrets and variables → Actions і створіть три repository secrets:
+## Налаштування Render
 
-| Назва | Значення |
-|---|---|
-| EC2_HOST | Публічна IPv4-адреса або DNS-ім'я інстансу |
-| EC2_USER | ubuntu для Ubuntu AMI |
-| EC2_SSH_KEY_B64 | Приватний PEM-ключ, закодований у Base64 одним рядком |
+1. Увійдіть до Render через GitHub і відкрийте **New → Blueprint**.
+2. Підключіть репозиторій koziceduard3-oss/lastname-node-ci; Render прочитає render.yaml у корені.
+3. Залиште Web Service на плані **Free**. Коли Render попросить **DATABASE_URL**, вставте скопійований Session pooler connection string із Supabase. Зберігайте його лише в налаштуваннях Render.
+4. Переконайтеся, що workflow GitHub Actions завершився успішно. Render збере Dockerfile та опублікує сервіс; його адресу покаже панель Render.
+5. Відкрийте адресу сервісу і перевірте /health. Успішна відповідь: {"status":"ok","database":"connected"}.
 
-У PowerShell однорядкове Base64-значення можна отримати локально так:
+Після налаштування кожен push у main запускає CI. Render розгортає нову версію після успішних CI checks. Змінні або ключі GitHub Actions для деплою не потрібні.
 
-~~~powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes('devops-key.pem'))
-~~~
+## Обмеження безкоштовних планів
 
-Не додавайте PEM-ключ у GitHub-репозиторій або звіт і не надсилайте його у відкритому вигляді. Збережіть лише Base64-значення в EC2_SSH_KEY_B64 у налаштуваннях Actions Secrets.
+- Безкоштовний Render Web Service засинає після 15 хвилин без трафіку; перший запит після цього може чекати близько хвилини. Вебсервіс може перезапускатися.
+- Безкоштовна база Supabase має квоту 500 МБ і може бути призупинена після тижня низької активності; її можна відновити в Supabase Dashboard.
+- Не використовуйте Render Free Postgres для цієї конфігурації: безкоштовні бази Render видаляються через 30 днів. У цьому проєкті PostgreSQL працює в Supabase.
 
-Security Group EC2 має дозволяти SSH (TCP 22) від GitHub Actions runner. IP-діапазони hosted runners змінюються; відкриття SSH для 0.0.0.0/0 полегшує тестування, але знижує безпеку. Для постійного використання обмежте джерело або використайте self-hosted runner чи AWS Systems Manager. Порт 3000 у цьому завданні відкривати не потрібно: workflow перевіряє застосунок на самому EC2. Для доступу до сайту з інтернету окремо дозвольте TCP 3000 у Security Group.
+Деталі: [Render Free Services](https://render.com/docs/free), [Supabase Free Plan](https://supabase.com/pricing), [Supabase Project Pausing](https://supabase.com/docs/guides/platform/free-project-pausing).
 
-Після push відкрийте вкладку Actions і перевірте зелений запуск. Якщо секретів EC2 ще немає, CI та збірка пройдуть, а кроки деплою будуть пропущені з попередженням. Після додавання секретів повторний push у main виконає фактичний деплой.
-
-EC2 може спричинити оплату залежно від ресурсів, регіону й доступного Free Tier/кредитів. Перевірте ліміт витрат свого AWS акаунта перед запуском інстансу.
+> У цій конфігурації хмарний деплой виконується на Render + Supabase, а не на Amazon EC2. Якщо викладач вимагає саме EC2, альтернативний провайдер може не відповідати критеріям практичної.
