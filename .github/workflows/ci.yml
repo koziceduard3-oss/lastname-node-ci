@@ -1,4 +1,4 @@
-name: Node.js CI/CD to EC2
+name: Node.js CI for Render and Supabase
 
 on:
   push:
@@ -10,19 +10,10 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ec2-cicd-main
-  cancel-in-progress: false
-
 jobs:
-  build-test-deploy:
-    name: Test, build, and deploy to EC2
+  build-and-test:
+    name: Build and integration check
     runs-on: ubuntu-latest
-    env:
-      EC2_HOST: ${{ secrets.EC2_HOST }}
-      EC2_USER: ${{ secrets.EC2_USER }}
-      EC2_SSH_KEY_B64: ${{ secrets.EC2_SSH_KEY_B64 }}
-      EC2_READY: ${{ secrets.EC2_HOST != '' && secrets.EC2_USER != '' && secrets.EC2_SSH_KEY_B64 != '' }}
 
     steps:
       - name: Check out repository
@@ -70,64 +61,3 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
-
-      - name: Prepare EC2 SSH key
-        if: env.EC2_READY == 'true' && github.ref == 'refs/heads/main'
-        run: |
-          set -euo pipefail
-          printf '%s' "$EC2_SSH_KEY_B64" | base64 --decode > "$RUNNER_TEMP/ec2-key.pem"
-          chmod 600 "$RUNNER_TEMP/ec2-key.pem"
-
-      - name: Copy project to EC2
-        if: env.EC2_READY == 'true' && github.ref == 'refs/heads/main'
-        run: |
-          set -euo pipefail
-          : "${EC2_HOST:?Set EC2_HOST in repository secrets}"
-          : "${EC2_USER:?Set EC2_USER in repository secrets}"
-          rsync -az --delete --exclude='.git/' --exclude='node_modules/' --exclude='dist/' --exclude='.env' -e "ssh -i $RUNNER_TEMP/ec2-key.pem -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20" ./ "$EC2_USER@$EC2_HOST:nodeapp/"
-
-      - name: Start the application on EC2
-        if: env.EC2_READY == 'true' && github.ref == 'refs/heads/main'
-        run: |
-          set -euo pipefail
-          ssh -i "$RUNNER_TEMP/ec2-key.pem" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 "$EC2_USER@$EC2_HOST" 'bash -s' <<'REMOTE'
-          set -euo pipefail
-          if ! command -v docker >/dev/null 2>&1 || ! sudo docker compose version >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y ca-certificates curl openssl
-            curl -fsSL https://get.docker.com | sudo sh
-          fi
-          sudo systemctl enable --now docker
-          cd "$HOME/nodeapp"
-
-          if [ ! -s .env ]; then
-            postgres_password="$(openssl rand -hex 32)"
-            umask 077
-            cat > .env <<EOF
-          POSTGRES_DB=nodeapp
-          POSTGRES_USER=nodeapp
-          POSTGRES_PASSWORD=$postgres_password
-          EOF
-          fi
-
-          sudo docker compose up -d --build --remove-orphans
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:3000/health; then
-              echo
-              echo 'EC2 application and PostgreSQL health check passed.'
-              exit 0
-            fi
-            sleep 2
-          done
-          sudo docker compose ps
-          sudo docker compose logs --tail=100 app db
-          exit 1
-          REMOTE
-
-      - name: Report that EC2 deployment is not configured
-        if: github.ref == 'refs/heads/main' && env.EC2_READY != 'true'
-        run: echo '::warning::CI and build passed, but EC2 deployment was skipped. Add EC2_HOST, EC2_USER, and EC2_SSH_KEY_B64 repository secrets.'
-
-      - name: Remove temporary SSH key
-        if: always()
-        run: rm -f "$RUNNER_TEMP/ec2-key.pem"
