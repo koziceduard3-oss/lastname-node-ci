@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: lastname-node-ci
+    runtime: docker
+    repo: https://github.com/koziceduard3-oss/lastname-node-ci
+    branch: main
+    region: frankfurt
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: DATABASE_URL
+        sync: false
