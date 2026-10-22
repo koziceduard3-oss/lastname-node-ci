@@ -43,5 +43,3 @@ Workflow .github/workflows/ci.yml запускається після push у ma
 - Не використовуйте Render Free Postgres для цієї конфігурації: безкоштовні бази Render видаляються через 30 днів. У цьому проєкті PostgreSQL працює в Supabase.
 
 Деталі: [Render Free Services](https://render.com/docs/free), [Supabase Free Plan](https://supabase.com/pricing), [Supabase Project Pausing](https://supabase.com/docs/guides/platform/free-project-pausing).
-
-> У цій конфігурації хмарний деплой виконується на Render + Supabase, а не на Amazon EC2. Якщо викладач вимагає саме EC2, альтернативний провайдер може не відповідати критеріям практичної.
